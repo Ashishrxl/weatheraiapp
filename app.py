@@ -88,13 +88,29 @@ def load_or_build_dataset(lat, lon):
     today = datetime.utcnow().date()
     start_date = today - timedelta(days=365 * YEARS_OF_HISTORY)
 
-    if os.path.exists(CACHE_FILE):
-        with gzip.open(CACHE_FILE, "rb") as f:
-            df = pickle.load(f)
-        df["time"] = pd.to_datetime(df["time"])
-    else:
-        df = pd.DataFrame()
+    df = pd.DataFrame()
 
+    # =============================
+    # SAFE CACHE LOAD
+    # =============================
+    if os.path.exists(CACHE_FILE):
+
+        try:
+            with gzip.open(CACHE_FILE, "rb") as f:
+                df = pickle.load(f)
+
+            df["time"] = pd.to_datetime(df["time"])
+
+        except Exception:
+            # ⭐ Corrupted cache auto-fix
+            os.remove(CACHE_FILE)
+            st.warning("Cache corrupted → rebuilding dataset")
+
+            df = pd.DataFrame()
+
+    # =============================
+    # Detect missing ranges
+    # =============================
     if len(df) > 0:
         oldest = df["time"].min().date()
         newest = df["time"].max().date()
@@ -114,8 +130,8 @@ def load_or_build_dataset(lat, lon):
 
     for r_start, r_end in missing_ranges:
         current = r_start
-        while current <= r_end:
 
+        while current <= r_end:
             chunk_end = min(current + timedelta(days=CHUNK_DAYS), r_end)
 
             chunk_tasks.append((
@@ -127,7 +143,11 @@ def load_or_build_dataset(lat, lon):
 
             current = chunk_end + timedelta(days=1)
 
+    # =============================
+    # Parallel Download
+    # =============================
     if chunk_tasks:
+
         st.info(f"Downloading {len(chunk_tasks)} historical chunks...")
 
         parts = []
@@ -137,6 +157,7 @@ def load_or_build_dataset(lat, lon):
 
             for f in concurrent.futures.as_completed(futures):
                 data = f.result()
+
                 if len(data) > 0:
                     parts.append(data)
 
@@ -151,8 +172,14 @@ def load_or_build_dataset(lat, lon):
     df = df.drop_duplicates(subset="time")
     df = df.sort_values("time")
 
-    with gzip.open(CACHE_FILE, "wb") as f:
-        pickle.dump(df, f)
+    # =============================
+    # SAFE CACHE SAVE
+    # =============================
+    try:
+        with gzip.open(CACHE_FILE, "wb") as f:
+            pickle.dump(df, f)
+    except:
+        st.warning("Cache save failed, continuing without cache")
 
     return df
 
