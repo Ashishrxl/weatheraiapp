@@ -153,7 +153,7 @@ if selected_lat and selected_lon:
         model.fit(
             X_train,
             y_train,
-            epochs=10,
+            epochs=30,
             batch_size=32,
             verbose=0
         )
