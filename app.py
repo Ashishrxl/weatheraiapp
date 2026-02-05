@@ -146,7 +146,7 @@ if lat and lon:
     df = df.dropna()
 
     st.subheader("📊 Latest Training Dataset")
-    st.dataframe(df.tail(48))
+    st.dataframe(df)
 
     # =============================
     # SCALING
