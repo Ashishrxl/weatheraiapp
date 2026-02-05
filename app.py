@@ -6,53 +6,86 @@ import tensorflow as tf
 from tensorflow.keras import layers
 from sklearn.preprocessing import MinMaxScaler
 import plotly.graph_objects as go
+import os
+from datetime import datetime
 
 # =============================
-# PAGE CONFIG
+# CONFIG
 # =============================
-st.set_page_config(page_title="Transformer Weather AI", layout="wide")
+DATA_FILE = "data/weather_dataset.csv"
+MODEL_FILE = "models/transformer_model.keras"
 
-st.title("🌦️ Multi-Variable Transformer Weather Forecast AI")
-st.markdown("### 🤖 AI Powered Weather Prediction")
+os.makedirs("data", exist_ok=True)
+os.makedirs("models", exist_ok=True)
+
+st.set_page_config(layout="wide")
+st.title("🌦️ Real-Time Transformer Weather AI")
 
 # =============================
-# CACHE FUNCTIONS
+# LOCATION SEARCH
 # =============================
 
 @st.cache_data(ttl=3600)
 def search_location(query):
     url = f"https://geocoding-api.open-meteo.com/v1/search?name={query}&count=5"
-    res = requests.get(url).json()
-    return res.get("results", [])
+    return requests.get(url).json().get("results", [])
 
+# =============================
+# REAL TIME WEATHER FETCH
+# =============================
 
-@st.cache_data(ttl=3600)
-def fetch_weather_data(lat, lon):
+def fetch_latest_weather(lat, lon):
+
     url = (
-        f"https://archive-api.open-meteo.com/v1/archive?"
+        f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={lat}&longitude={lon}"
-        f"&start_date=2024-01-01&end_date=2024-12-31"
         f"&hourly=temperature_2m,relativehumidity_2m,windspeed_10m,surface_pressure"
-        f"&timezone=auto"
+        f"&forecast_days=3&timezone=auto"
     )
 
-    return requests.get(url).json()
+    data = requests.get(url).json()
+
+    df = pd.DataFrame({
+        "time": pd.to_datetime(data["hourly"]["time"]),
+        "temp": data["hourly"]["temperature_2m"],
+        "humidity": data["hourly"]["relativehumidity_2m"],
+        "wind": data["hourly"]["windspeed_10m"],
+        "pressure": data["hourly"]["surface_pressure"],
+    })
+
+    return df
+
+# =============================
+# DATA STORAGE
+# =============================
+
+def update_local_dataset(new_df):
+
+    if os.path.exists(DATA_FILE):
+        old_df = pd.read_csv(DATA_FILE, parse_dates=["time"])
+        df = pd.concat([old_df, new_df])
+    else:
+        df = new_df
+
+    df = df.drop_duplicates(subset="time")
+    df = df.sort_values("time")
+
+    df.to_csv(DATA_FILE, index=False)
+    return df
 
 # =============================
 # TRANSFORMER MODEL
 # =============================
 
-def build_transformer_model(seq_len, num_features):
-    inputs = layers.Input(shape=(seq_len, num_features))
+def build_transformer(seq_len, features):
 
-    attention = layers.MultiHeadAttention(
-        num_heads=4, key_dim=32)(inputs, inputs)
+    inputs = layers.Input(shape=(seq_len, features))
 
-    x = layers.LayerNormalization()(inputs + attention)
+    attn = layers.MultiHeadAttention(num_heads=4, key_dim=32)(inputs, inputs)
+    x = layers.LayerNormalization()(inputs + attn)
 
     ff = layers.Dense(128, activation="relu")(x)
-    ff = layers.Dense(num_features)(ff)
-
+    ff = layers.Dense(features)(ff)
     x = layers.LayerNormalization()(x + ff)
 
     x = layers.GlobalAveragePooling1D()(x)
@@ -64,17 +97,16 @@ def build_transformer_model(seq_len, num_features):
     return model
 
 # =============================
-# DATA PREPARATION
+# PREPARE DATA
 # =============================
 
-def prepare_data(data, seq_len=24):
-    features = data.values
+def prepare_sequences(data, seq_len=24):
 
     X, y = [], []
 
-    for i in range(len(features) - seq_len):
-        X.append(features[i:i+seq_len])
-        y.append(features[i+seq_len][0])  # Predict temperature
+    for i in range(len(data) - seq_len):
+        X.append(data[i:i+seq_len])
+        y.append(data[i+seq_len][0])
 
     return np.array(X), np.array(y)
 
@@ -82,131 +114,106 @@ def prepare_data(data, seq_len=24):
 # LOCATION INPUT
 # =============================
 
-query = st.text_input("📍 Type City Name")
+query = st.text_input("📍 Enter City")
 
-selected_lat = None
-selected_lon = None
+lat, lon = None, None
 
 if query:
-    suggestions = search_location(query)
+    results = search_location(query)
 
-    if suggestions:
+    if results:
         options = {
-            f"{s['name']}, {s.get('country','')} (Lat:{s['latitude']}, Lon:{s['longitude']})":
-            (s["latitude"], s["longitude"])
-            for s in suggestions
+            f"{r['name']}, {r.get('country','')}":
+            (r["latitude"], r["longitude"])
+            for r in results
         }
 
-        choice = st.selectbox("Select Location", list(options.keys()))
-
-        selected_lat, selected_lon = options[choice]
-
-        st.success(f"Latitude: {selected_lat} | Longitude: {selected_lon}")
+        selected = st.selectbox("Select Location", options.keys())
+        lat, lon = options[selected]
 
 # =============================
-# MAIN FORECAST
+# MAIN PIPELINE
 # =============================
 
-if selected_lat and selected_lon:
+if lat and lon:
 
-    weather = fetch_weather_data(selected_lat, selected_lon)
+    st.info("Fetching latest weather data...")
 
-    hourly = weather["hourly"]
+    new_data = fetch_latest_weather(lat, lon)
+    df = update_local_dataset(new_data)
 
-    df = pd.DataFrame({
-        "time": pd.to_datetime(hourly["time"]),
-        "temp": hourly["temperature_2m"],
-        "humidity": hourly["relativehumidity_2m"],
-        "wind": hourly["windspeed_10m"],
-        "pressure": hourly["surface_pressure"],
-    })
-
-    df = df.dropna()
     df = df.set_index("time")
+    df = df.dropna()
 
-    st.subheader("📊 Training Data Sample")
-    st.dataframe(df)
+    st.subheader("📊 Latest Training Dataset")
+    st.dataframe(df.tail(48))
 
     # =============================
     # SCALING
     # =============================
-
     scaler = MinMaxScaler()
-    scaled_data = scaler.fit_transform(df)
+    scaled = scaler.fit_transform(df)
 
     seq_len = 24
-    X, y = prepare_data(pd.DataFrame(scaled_data), seq_len)
+    X, y = prepare_sequences(scaled, seq_len)
 
-    split = int(len(X) * 0.8)
-
-    X_train, X_test = X[:split], X[split:]
-    y_train, y_test = y[:split], y[split:]
+    if len(X) < 50:
+        st.warning("Not enough data yet")
+        st.stop()
 
     # =============================
-    # TRAIN MODEL
+    # TRAIN OR LOAD MODEL
     # =============================
 
-    with st.spinner("Training Transformer Weather AI..."):
+    if os.path.exists(MODEL_FILE):
 
-        model = build_transformer_model(seq_len, df.shape[1])
+        model = tf.keras.models.load_model(MODEL_FILE)
+        st.success("Loaded Existing AI Model")
 
-        model.fit(
-            X_train,
-            y_train,
-            epochs=30,
-            batch_size=32,
-            verbose=0
-        )
+    else:
+        st.info("Training New AI Model...")
 
-    st.success("Model Training Completed")
+        model = build_transformer(seq_len, df.shape[1])
+
+        model.fit(X, y, epochs=10, batch_size=32, verbose=0)
+
+        model.save(MODEL_FILE)
 
     # =============================
     # FORECAST
     # =============================
 
     last_seq = X[-1].reshape(1, seq_len, df.shape[1])
-
     forecast_scaled = []
-    temp_seq = last_seq.copy()
+
+    seq = last_seq.copy()
 
     for _ in range(24):
 
-        pred_scaled = model.predict(temp_seq, verbose=0)[0][0]
+        pred = model.predict(seq, verbose=0)[0][0]
 
-        new_step = temp_seq[0, -1].copy()
-        new_step[0] = pred_scaled
+        new_step = seq[0, -1].copy()
+        new_step[0] = pred
 
         forecast_scaled.append(new_step)
 
-        temp_seq = np.append(
-            temp_seq[:, 1:, :],
-            [[new_step]],
-            axis=1
-        )
+        seq = np.append(seq[:, 1:, :], [[new_step]], axis=1)
 
     forecast_scaled = np.array(forecast_scaled)
-
     forecast_real = scaler.inverse_transform(forecast_scaled)
     forecast_temp = forecast_real[:, 0]
 
     # =============================
-    # FUTURE TIME
+    # TIME
     # =============================
 
-    last_time = df.index[-1]
-
-    future_hours = pd.date_range(
-        start=last_time + pd.Timedelta(hours=1),
+    future_time = pd.date_range(
+        start=datetime.now(),
         periods=24,
         freq="H"
     )
 
     forecast_clean = [round(float(x), 2) for x in forecast_temp]
-
-    forecast_df = pd.DataFrame({
-        "Time": future_hours,
-        "Temperature (°C)": forecast_clean
-    })
 
     # =============================
     # GRAPH
@@ -217,35 +224,25 @@ if selected_lat and selected_lon:
     fig.add_trace(go.Scatter(
         x=df.index[-48:],
         y=df["temp"].tail(48),
-        name="Past Temperature"
+        name="Past Temp"
     ))
 
     fig.add_trace(go.Scatter(
-        x=future_hours,
+        x=future_time,
         y=forecast_clean,
-        name="Forecast Temperature"
+        name="Forecast Temp"
     ))
-
-    fig.update_layout(
-        xaxis_title="Time",
-        yaxis_title="Temperature °C"
-    )
 
     st.plotly_chart(fig, use_container_width=True)
 
     # =============================
-    # FORECAST TABLE
+    # TABLE
     # =============================
 
-    st.subheader("🌡️ Next 24 Hour AI Temperature Forecast")
-    st.dataframe(forecast_df, use_container_width=True)
+    forecast_df = pd.DataFrame({
+        "Time": future_time,
+        "Temperature °C": forecast_clean
+    })
 
-    # =============================
-    # SUMMARY METRICS
-    # =============================
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("🌤️ Avg Temp", f"{np.mean(forecast_clean):.1f} °C")
-    col2.metric("🔥 Max Temp", f"{np.max(forecast_clean):.1f} °C")
-    col3.metric("❄️ Min Temp", f"{np.min(forecast_clean):.1f} °C")
+    st.subheader("🌡️ Next 24 Hour Forecast")
+    st.dataframe(forecast_df)
