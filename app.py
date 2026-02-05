@@ -7,7 +7,7 @@ from tensorflow.keras import layers
 from sklearn.preprocessing import MinMaxScaler
 import plotly.graph_objects as go
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # =============================
 # CONFIG
@@ -19,7 +19,7 @@ os.makedirs("data", exist_ok=True)
 os.makedirs("models", exist_ok=True)
 
 st.set_page_config(layout="wide")
-st.title("🌦️ Real-Time Transformer Weather AI")
+st.title("🌦️ Real-Time Weather Transformer AI")
 
 # =============================
 # LOCATION SEARCH
@@ -30,15 +30,17 @@ def search_location(query):
     return requests.get(url).json().get("results", [])
 
 # =============================
-# FETCH WEATHER (Forecast API)
+# HISTORICAL WEATHER API
 # =============================
-def fetch_latest_weather(lat, lon):
+@st.cache_data(ttl=86400)
+def fetch_historical_weather(lat, lon, start_date, end_date):
 
     url = (
-        f"https://api.open-meteo.com/v1/forecast?"
+        "https://archive-api.open-meteo.com/v1/archive?"
         f"latitude={lat}&longitude={lon}"
-        f"&hourly=temperature_2m,relativehumidity_2m,windspeed_10m,surface_pressure"
-        f"&forecast_days=3&timezone=auto"
+        f"&start_date={start_date}&end_date={end_date}"
+        "&hourly=temperature_2m,relativehumidity_2m,windspeed_10m,surface_pressure"
+        "&timezone=auto"
     )
 
     data = requests.get(url).json()
@@ -54,25 +56,70 @@ def fetch_latest_weather(lat, lon):
     return df
 
 # =============================
-# DATA STORAGE WITH FUTURE FILTER
+# FORECAST WEATHER
 # =============================
-def update_local_dataset(new_df):
+def fetch_latest_weather(lat, lon):
 
-    now = pd.Timestamp.now()
+    url = (
+        "https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat}&longitude={lon}"
+        "&hourly=temperature_2m,relativehumidity_2m,windspeed_10m,surface_pressure"
+        "&forecast_days=3&timezone=auto"
+    )
 
-    # Remove future data (IMPORTANT FIX)
-    new_df = new_df[new_df["time"] <= now]
+    data = requests.get(url).json()
 
+    df = pd.DataFrame({
+        "time": pd.to_datetime(data["hourly"]["time"]),
+        "temp": data["hourly"]["temperature_2m"],
+        "humidity": data["hourly"]["relativehumidity_2m"],
+        "wind": data["hourly"]["windspeed_10m"],
+        "pressure": data["hourly"]["surface_pressure"],
+    })
+
+    return df
+
+# =============================
+# UPDATE DATASET SMARTLY
+# =============================
+def update_dataset(lat, lon):
+
+    today = datetime.utcnow().date()
+
+    # If dataset exists -> load
     if os.path.exists(DATA_FILE):
-        old_df = pd.read_csv(DATA_FILE, parse_dates=["time"])
-        df = pd.concat([old_df, new_df])
+        df = pd.read_csv(DATA_FILE, parse_dates=["time"])
+        last_date = df["time"].max().date()
     else:
-        df = new_df
+        df = pd.DataFrame()
+        last_date = today - timedelta(days=365)
 
+    # Fetch missing historical
+    if last_date < today:
+
+        start = last_date + timedelta(days=1)
+        st.info(f"Loading historical data {start} → {today}")
+
+        hist_df = fetch_historical_weather(
+            lat, lon,
+            start.isoformat(),
+            today.isoformat()
+        )
+
+        df = pd.concat([df, hist_df])
+
+    # Fetch latest short-term forecast (acts as recent observed)
+    latest = fetch_latest_weather(lat, lon)
+
+    # Remove future timestamps
+    latest = latest[latest["time"] <= pd.Timestamp.now()]
+
+    df = pd.concat([df, latest])
     df = df.drop_duplicates(subset="time")
     df = df.sort_values("time")
 
     df.to_csv(DATA_FILE, index=False)
+
     return df
 
 # =============================
@@ -82,17 +129,15 @@ def build_transformer(seq_len, features):
 
     inputs = layers.Input(shape=(seq_len, features))
 
-    attn = layers.MultiHeadAttention(
-        num_heads=4, key_dim=32)(inputs, inputs)
-
+    attn = layers.MultiHeadAttention(num_heads=4, key_dim=32)(inputs, inputs)
     x = layers.LayerNormalization()(inputs + attn)
 
     ff = layers.Dense(128, activation="relu")(x)
     ff = layers.Dense(features)(ff)
 
     x = layers.LayerNormalization()(x + ff)
-
     x = layers.GlobalAveragePooling1D()(x)
+
     outputs = layers.Dense(1)(x)
 
     model = tf.keras.Model(inputs, outputs)
@@ -101,7 +146,7 @@ def build_transformer(seq_len, features):
     return model
 
 # =============================
-# SEQUENCE PREPARATION
+# SEQUENCE PREP
 # =============================
 def prepare_sequences(data, seq_len=24):
 
@@ -138,25 +183,16 @@ if query:
 # =============================
 if lat and lon:
 
-    st.info("Fetching latest weather data...")
-
-    new_data = fetch_latest_weather(lat, lon)
-    df = update_local_dataset(new_data)
+    df = update_dataset(lat, lon)
 
     df = df.set_index("time")
-
-    # Safety filter (extra protection)
-    df = df[df.index <= pd.Timestamp.now()]
-
     df = df.dropna()
 
-    st.info(f"Dataset updated until: {df.index.max()}")
-
-    st.subheader("📊 Latest Training Dataset")
-    st.dataframe(df.tail(48))
+    st.success(f"Dataset updated until {df.index.max()}")
+    st.write(f"Total samples: {len(df)}")
 
     # =============================
-    # SCALING
+    # SCALE
     # =============================
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(df)
@@ -164,36 +200,29 @@ if lat and lon:
     seq_len = 24
     X, y = prepare_sequences(scaled, seq_len)
 
-    if len(X) < 50:
-        st.warning("Not enough historical data yet. Keep running app to collect more.")
+    if len(X) < 100:
+        st.warning("Need more history data")
         st.stop()
 
     # =============================
-    # TRAIN OR LOAD MODEL
+    # TRAIN / LOAD MODEL
     # =============================
     if os.path.exists(MODEL_FILE):
-
         model = tf.keras.models.load_model(MODEL_FILE)
-        st.success("Loaded Existing AI Model")
-
     else:
-        st.info("Training New AI Model...")
-
         model = build_transformer(seq_len, df.shape[1])
         model.fit(X, y, epochs=10, batch_size=32, verbose=0)
-
         model.save(MODEL_FILE)
 
     # =============================
     # FORECAST
     # =============================
     last_seq = X[-1].reshape(1, seq_len, df.shape[1])
-    forecast_scaled = []
 
+    forecast_scaled = []
     seq = last_seq.copy()
 
     for _ in range(24):
-
         pred = model.predict(seq, verbose=0)[0][0]
 
         new_step = seq[0, -1].copy()
@@ -207,16 +236,9 @@ if lat and lon:
     forecast_real = scaler.inverse_transform(forecast_scaled)
     forecast_temp = forecast_real[:, 0]
 
-    # =============================
-    # TIME
-    # =============================
-    future_time = pd.date_range(
-        start=datetime.now(),
-        periods=24,
-        freq="H"
-    )
+    future_time = pd.date_range(datetime.now(), periods=24, freq="H")
 
-    forecast_clean = [round(float(x), 2) for x in forecast_temp]
+    forecast_temp = [round(float(x), 2) for x in forecast_temp]
 
     # =============================
     # GRAPH
@@ -224,15 +246,15 @@ if lat and lon:
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
-        x=df.index[-48:],
-        y=df["temp"].tail(48),
-        name="Past Temp"
+        x=df.index[-72:],
+        y=df["temp"].tail(72),
+        name="Past Temperature"
     ))
 
     fig.add_trace(go.Scatter(
         x=future_time,
-        y=forecast_clean,
-        name="Forecast Temp"
+        y=forecast_temp,
+        name="Forecast"
     ))
 
     st.plotly_chart(fig, use_container_width=True)
@@ -240,19 +262,11 @@ if lat and lon:
     # =============================
     # TABLE
     # =============================
+    st.subheader("Next 24 Hour Forecast")
+
     forecast_df = pd.DataFrame({
         "Time": future_time,
-        "Temperature °C": forecast_clean
+        "Temperature °C": forecast_temp
     })
 
-    st.subheader("🌡️ Next 24 Hour Forecast")
     st.dataframe(forecast_df)
-
-    # =============================
-    # SUMMARY METRICS
-    # =============================
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("Average Temp", f"{np.mean(forecast_clean):.1f} °C")
-    col2.metric("Max Temp", f"{np.max(forecast_clean):.1f} °C")
-    col3.metric("Min Temp", f"{np.min(forecast_clean):.1f} °C")
