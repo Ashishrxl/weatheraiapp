@@ -125,7 +125,7 @@ if selected_lat and selected_lon:
     df = df.set_index("time")
 
     st.subheader("📊 Training Data Sample")
-    st.dataframe(df.head())
+    st.dataframe(df)
 
     # =============================
     # SCALING
