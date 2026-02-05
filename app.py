@@ -24,16 +24,14 @@ st.title("🌦️ Real-Time Transformer Weather AI")
 # =============================
 # LOCATION SEARCH
 # =============================
-
 @st.cache_data(ttl=3600)
 def search_location(query):
     url = f"https://geocoding-api.open-meteo.com/v1/search?name={query}&count=5"
     return requests.get(url).json().get("results", [])
 
 # =============================
-# REAL TIME WEATHER FETCH
+# FETCH WEATHER (Forecast API)
 # =============================
-
 def fetch_latest_weather(lat, lon):
 
     url = (
@@ -56,10 +54,14 @@ def fetch_latest_weather(lat, lon):
     return df
 
 # =============================
-# DATA STORAGE
+# DATA STORAGE WITH FUTURE FILTER
 # =============================
-
 def update_local_dataset(new_df):
+
+    now = pd.Timestamp.now()
+
+    # Remove future data (IMPORTANT FIX)
+    new_df = new_df[new_df["time"] <= now]
 
     if os.path.exists(DATA_FILE):
         old_df = pd.read_csv(DATA_FILE, parse_dates=["time"])
@@ -76,16 +78,18 @@ def update_local_dataset(new_df):
 # =============================
 # TRANSFORMER MODEL
 # =============================
-
 def build_transformer(seq_len, features):
 
     inputs = layers.Input(shape=(seq_len, features))
 
-    attn = layers.MultiHeadAttention(num_heads=4, key_dim=32)(inputs, inputs)
+    attn = layers.MultiHeadAttention(
+        num_heads=4, key_dim=32)(inputs, inputs)
+
     x = layers.LayerNormalization()(inputs + attn)
 
     ff = layers.Dense(128, activation="relu")(x)
     ff = layers.Dense(features)(ff)
+
     x = layers.LayerNormalization()(x + ff)
 
     x = layers.GlobalAveragePooling1D()(x)
@@ -97,9 +101,8 @@ def build_transformer(seq_len, features):
     return model
 
 # =============================
-# PREPARE DATA
+# SEQUENCE PREPARATION
 # =============================
-
 def prepare_sequences(data, seq_len=24):
 
     X, y = [], []
@@ -113,7 +116,6 @@ def prepare_sequences(data, seq_len=24):
 # =============================
 # LOCATION INPUT
 # =============================
-
 query = st.text_input("📍 Enter City")
 
 lat, lon = None, None
@@ -134,7 +136,6 @@ if query:
 # =============================
 # MAIN PIPELINE
 # =============================
-
 if lat and lon:
 
     st.info("Fetching latest weather data...")
@@ -143,10 +144,16 @@ if lat and lon:
     df = update_local_dataset(new_data)
 
     df = df.set_index("time")
+
+    # Safety filter (extra protection)
+    df = df[df.index <= pd.Timestamp.now()]
+
     df = df.dropna()
 
+    st.info(f"Dataset updated until: {df.index.max()}")
+
     st.subheader("📊 Latest Training Dataset")
-    st.dataframe(df)
+    st.dataframe(df.tail(48))
 
     # =============================
     # SCALING
@@ -158,13 +165,12 @@ if lat and lon:
     X, y = prepare_sequences(scaled, seq_len)
 
     if len(X) < 50:
-        st.warning("Not enough data yet")
+        st.warning("Not enough historical data yet. Keep running app to collect more.")
         st.stop()
 
     # =============================
     # TRAIN OR LOAD MODEL
     # =============================
-
     if os.path.exists(MODEL_FILE):
 
         model = tf.keras.models.load_model(MODEL_FILE)
@@ -174,7 +180,6 @@ if lat and lon:
         st.info("Training New AI Model...")
 
         model = build_transformer(seq_len, df.shape[1])
-
         model.fit(X, y, epochs=10, batch_size=32, verbose=0)
 
         model.save(MODEL_FILE)
@@ -182,7 +187,6 @@ if lat and lon:
     # =============================
     # FORECAST
     # =============================
-
     last_seq = X[-1].reshape(1, seq_len, df.shape[1])
     forecast_scaled = []
 
@@ -206,7 +210,6 @@ if lat and lon:
     # =============================
     # TIME
     # =============================
-
     future_time = pd.date_range(
         start=datetime.now(),
         periods=24,
@@ -218,7 +221,6 @@ if lat and lon:
     # =============================
     # GRAPH
     # =============================
-
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(
@@ -238,7 +240,6 @@ if lat and lon:
     # =============================
     # TABLE
     # =============================
-
     forecast_df = pd.DataFrame({
         "Time": future_time,
         "Temperature °C": forecast_clean
@@ -246,3 +247,12 @@ if lat and lon:
 
     st.subheader("🌡️ Next 24 Hour Forecast")
     st.dataframe(forecast_df)
+
+    # =============================
+    # SUMMARY METRICS
+    # =============================
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Average Temp", f"{np.mean(forecast_clean):.1f} °C")
+    col2.metric("Max Temp", f"{np.max(forecast_clean):.1f} °C")
+    col3.metric("Min Temp", f"{np.min(forecast_clean):.1f} °C")
