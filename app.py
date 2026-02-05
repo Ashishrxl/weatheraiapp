@@ -17,7 +17,7 @@ import torch.nn as nn
 # CONFIG
 # =========================
 
-YEARS_OF_HISTORY = 2
+YEARS_OF_HISTORY = 1
 CHUNK_DAYS = 30
 CACHE_FILE = "weather_dataset.pkl.gz"
 
