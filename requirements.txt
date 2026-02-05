@@ -1,8 +1,6 @@
 streamlit
+tensorflow
 pandas
 numpy
 requests
-tensorflow
-matplotlib
-geopy
-joblib
+plotly
