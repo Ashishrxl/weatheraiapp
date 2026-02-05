@@ -15,8 +15,7 @@ st.title("🌦️ Multi-Variable Transformer Weather Forecast AI")
 
 st.markdown("""
 ### 🤖 AI Powered Transformer Weather Prediction
-Enter your city to generate deep learning forecast.
-""")
+Enter your city to generate deep learning forecast.""")
 # =============================
 # CACHING FUNCTIONS
 # =============================
@@ -208,14 +207,9 @@ if selected_lat and selected_lon:
     forecast_clean = [round(float(x), 2) for x in forecast]
 
 # Create time labels
-    future_hours = pd.date_range(
-    start=pd.Timestamp.now(),
-    periods=24,
-    freq="H")
+    future_hours = pd.date_range(start=pd.Timestamp.now(), periods=24, freq="H")
 
-    forecast_df = pd.DataFrame({
-    "Time": future_hours,
-    "Temperature (°C)": forecast_clean})
+    forecast_df = pd.DataFrame({"Time": future_hours, "Temperature (°C)": forecast_clean})
 
 # =============================
 # DISPLAY FORECAST TABLE
@@ -223,11 +217,7 @@ if selected_lat and selected_lon:
 
     st.subheader("🌡️ Next 24 Hour AI Temperature Forecast")
 
-    st.dataframe(
-    forecast_df.style.format({
-        "Temperature (°C)": "{:.2f}"
-    }),
-    use_container_width=True)
+    st.dataframe(forecast_df.style.format({"Temperature (°C)": "{:.2f}"}), use_container_width=True)
 
 # =============================
 # BETTER VISUAL CHART
@@ -235,16 +225,9 @@ if selected_lat and selected_lon:
 
     chart_fig = go.Figure()
 
-    chart_fig.add_trace(go.Scatter(
-    x=future_hours,
-    y=forecast_clean,
-    mode="lines+markers",
-    name="Forecast Temperature"))
+    chart_fig.add_trace(go.Scatter(x=future_hours, y=forecast_clean, mode="lines+markers", name="Forecast Temperature"))
 
-    chart_fig.update_layout(
-    xaxis_title="Time",
-    yaxis_title="Temperature °C",
-    hovermode="x unified")
+    chart_fig.update_layout(xaxis_title="Time", yaxis_title="Temperature °C", hovermode="x unified")
 
     st.plotly_chart(chart_fig, use_container_width=True)
 
@@ -254,14 +237,8 @@ if selected_lat and selected_lon:
 
     col1, col2, col3 = st.columns(3)
 
-    col1.metric(
-    "🌤️ Avg Temp",
-    f"{np.mean(forecast_clean):.1f} °C")
+    col1.metric("🌤️ Avg Temp", f"{np.mean(forecast_clean):.1f} °C")
 
-    col2.metric(
-    "🔥 Max Temp",
-    f"{np.max(forecast_clean):.1f} °C")
+    col2.metric("🔥 Max Temp", f"{np.max(forecast_clean):.1f} °C")
 
-    col3.metric(
-    "❄️ Min Temp",
-    f"{np.min(forecast_clean):.1f} °C")
+    col3.metric("❄️ Min Temp", f"{np.min(forecast_clean):.1f} °C")
